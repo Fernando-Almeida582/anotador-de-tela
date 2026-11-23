@@ -8,7 +8,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Anotador.ico</ApplicationIcon>
     <AssemblyName>Anotador</AssemblyName>
-    <Version>0.9.0</Version>
+    <Version>0.10.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="Anotador.ico" LogicalName="Anotador.Icon" />
