@@ -20,7 +20,7 @@ internal static class Screenshot
     private static extern bool BitBlt(IntPtr destination, int x, int y, int width, int height,
         IntPtr source, int sourceX, int sourceY, uint operation);
 
-    private static void CopyDesktop(Gdi.Bitmap bitmap, Gdi.Rectangle area)
+    internal static void CopyDesktop(Gdi.Bitmap bitmap, Gdi.Rectangle area)
     {
         const uint sourceCopyWithLayeredWindows = 0x40CC0020;
         using var destination = Gdi.Graphics.FromImage(bitmap);
@@ -67,10 +67,7 @@ internal static class Screenshot
 
     internal static BitmapSource ReadRegion(Overlay overlay, Rect selection)
     {
-        var screen = overlay.Screen.Bounds;
-        var dpi = VisualTreeHelper.GetDpi(overlay.Surface);
-        Int32Rect pixels = PixelRegion(selection, dpi, screen.Width, screen.Height);
-        var bounds = new Gdi.Rectangle(screen.X + pixels.X, screen.Y + pixels.Y, pixels.Width, pixels.Height);
+        Gdi.Rectangle bounds = RegionBounds(overlay, selection);
         using var bitmap = new Gdi.Bitmap(bounds.Width, bounds.Height, Gdi.Imaging.PixelFormat.Format32bppRgb);
         CopyDesktop(bitmap, bounds);
         IntPtr handle = bitmap.GetHbitmap();
@@ -112,6 +109,14 @@ internal static class Screenshot
             return Crop(result, selection, dpi);
         }
         finally { DeleteObject(handle); }
+    }
+
+    internal static Gdi.Rectangle RegionBounds(Overlay overlay, Rect selection)
+    {
+        var screen = overlay.Screen.Bounds;
+        var dpi = VisualTreeHelper.GetDpi(overlay.Surface);
+        Int32Rect pixels = PixelRegion(selection, dpi, screen.Width, screen.Height);
+        return new Gdi.Rectangle(screen.X + pixels.X, screen.Y + pixels.Y, pixels.Width, pixels.Height);
     }
 
     private static BitmapSource Crop(BitmapSource bitmap, Rect? selection, DpiScale dpi)

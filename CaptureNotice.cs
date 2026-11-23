@@ -15,10 +15,10 @@ internal sealed class CaptureNotice : Window
     private readonly Forms.Screen screen;
     private readonly DispatcherTimer timeout = new() { Interval = TimeSpan.FromSeconds(9) };
 
-    internal CaptureNotice(BitmapSource image, string path, Forms.Screen screen)
+    internal CaptureNotice(BitmapSource image, string path, Forms.Screen screen, string title, string openLabel)
     {
         this.screen = screen;
-        Title = "Captura salva";
+        Title = title;
         Width = 340;
         Height = 248;
         WindowStyle = WindowStyle.None;
@@ -39,7 +39,7 @@ internal sealed class CaptureNotice : Window
         heading.Children.Add(dismiss);
         heading.Children.Add(new TextBlock
         {
-            Text = "Captura salva",
+            Text = title,
             VerticalAlignment = VerticalAlignment.Center,
             FontSize = 17,
             FontWeight = FontWeights.SemiBold,
@@ -50,7 +50,7 @@ internal sealed class CaptureNotice : Window
         var preview = new Image { Source = image, Stretch = Stretch.Uniform, Margin = new Thickness(0, 10, 0, 10) };
         Grid.SetRow(preview, 1);
         layout.Children.Add(preview);
-        var open = new Button { Content = "Abrir imagem", Padding = new Thickness(10, 5, 10, 5) };
+        var open = new Button { Content = openLabel, Padding = new Thickness(10, 5, 10, 5) };
         open.Click += (_, _) =>
         {
             try
@@ -60,7 +60,7 @@ internal sealed class CaptureNotice : Window
             }
             catch (Win32Exception error)
             {
-                MessageBox.Show(this, error.Message, "Abrir imagem");
+                MessageBox.Show(this, error.Message, openLabel);
             }
         };
         Grid.SetRow(open, 2);

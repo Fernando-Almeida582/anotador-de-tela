@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -21,6 +22,11 @@ internal sealed class Controller
     private const int DrawHotkey = 1;
     private const int VisibilityHotkey = 2;
     private const int FinishHotkey = 3;
+    private const int RecordingHotkey = 4;
+    private const uint ExcludeFromCapture = 0x11;
+    private CancellationTokenSource? recordingStop;
+    private Task? recording;
+    private Button recordingButton = null!;
     private CaptureNotice? notice;
     private readonly Application app;
     private readonly HwndSource messages;
@@ -71,6 +77,7 @@ internal sealed class Controller
         SetHotkey(DrawHotkey, 'A', 'D');
         SetHotkey(VisibilityHotkey, 'H', 'V');
         SetHotkey(FinishHotkey, 'S', 'G');
+        SetHotkey(RecordingHotkey, 'R', 'F');
 
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add(Label("Ativar ou pausar desenho", DrawHotkey), null, (_, _) => Post(ToggleDrawing));
@@ -79,6 +86,20 @@ internal sealed class Controller
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("Copiar captura do monitor sob o cursor", null, (_, _) => Post(() => _ = Capture(false, true)));
         menu.Items.Add("Salvar captura do monitor sob o cursor…", null, (_, _) => Post(() => _ = Capture(true, true)));
+        menu.Items.Add(new Forms.ToolStripSeparator());
+        var recordScreen = new Forms.ToolStripMenuItem("Gravar monitor inteiro");
+        recordScreen.Click += (_, _) => Post(() => StartRecording(false));
+        var recordRegion = new Forms.ToolStripMenuItem("Gravar área selecionada");
+        recordRegion.Click += (_, _) => Post(() => StartRecording(true));
+        var stopVideo = new Forms.ToolStripMenuItem(Label("Parar gravação", RecordingHotkey));
+        stopVideo.Click += (_, _) => Post(() => recordingStop?.Cancel());
+        menu.Items.AddRange(new Forms.ToolStripItem[] { recordScreen, recordRegion, stopVideo });
+        menu.Opening += (_, _) =>
+        {
+            recordScreen.Enabled = !Busy && recording == null;
+            recordRegion.Enabled = recordScreen.Enabled && SelectedRegionOverlay() != null;
+            stopVideo.Enabled = recordingStop is { IsCancellationRequested: false };
+        };
         menu.Items.Add(new Forms.ToolStripSeparator());
         var startupItem = new Forms.ToolStripMenuItem("Adicionar à inicialização do Windows");
         startupItem.Click += (_, _) => Post(ToggleStartup);
@@ -150,12 +171,18 @@ internal sealed class Controller
         if (wParam.ToInt32() == DrawHotkey) ToggleDrawing();
         if (wParam.ToInt32() == VisibilityHotkey) ToggleVisibility();
         if (wParam.ToInt32() == FinishHotkey) _ = Capture(false, finish: true);
+        if (wParam.ToInt32() == RecordingHotkey)
+        {
+            if (recordingStop != null) recordingStop.Cancel();
+            else StartRecording(SelectedRegionOverlay() != null);
+        }
         return IntPtr.Zero;
     }
 
     private void DisplaySettingsChanged(object? sender, EventArgs e) => Post(() =>
     {
         if (shuttingDown) return;
+        recordingStop?.Cancel();
         if (Busy) displayUpdatePending = true;
         else RefreshMonitors();
     });
@@ -249,9 +276,12 @@ internal sealed class Controller
         PauseDrawing();
     }
 
-    private void Shutdown()
+    private async void Shutdown()
     {
+        if (shuttingDown) return;
         shuttingDown = true;
+        recordingStop?.Cancel();
+        if (recording != null) await recording;
         app.Shutdown();
     }
     internal void FocusToolbar()
@@ -282,7 +312,7 @@ internal sealed class Controller
         {
             Title = "Anotador de tela",
             Width = 552,
-            Height = 142,
+            Height = 172,
             WindowStyle = WindowStyle.None,
             ResizeMode = ResizeMode.NoResize,
             ShowInTaskbar = false,
@@ -316,6 +346,7 @@ internal sealed class Controller
         modeButton = AddButton("Pausar", "M4,3 H6 V13 H4 Z M10,3 H12 V13 H10 Z", ToggleDrawing);
         AddButton("Concluir e salvar", "M14,8 A6,6 0 1 1 2,8 A6,6 0 1 1 14,8 Z M5,8 L7,10 11,6", () => _ = Capture(false, finish: true));
         AddButton("Ocultar barra", "M3,8 H13 M3,3 H13 V13 H3 Z", HideToolbar);
+        recordingButton = AddButton("Gravar…", "M8,2 A6,6 0 1 1 8,14 A6,6 0 1 1 8,2 Z", ShowRecordingMenu);
         UpdateToolButtons();
         UpdateModeButton();
         window.Closing += (_, e) =>
@@ -330,6 +361,92 @@ internal sealed class Controller
             if (e.ButtonState == MouseButtonState.Pressed) window.DragMove();
         };
         return window;
+    }
+
+    private Overlay? SelectedRegionOverlay() => overlays.FirstOrDefault(item =>
+        item.Surface.Board == restrictedBoard && item.Surface.CaptureRegion.HasValue);
+
+    private void ShowRecordingMenu()
+    {
+        if (recordingStop != null)
+        {
+            recordingStop.Cancel();
+            return;
+        }
+
+        var menu = new ContextMenu { PlacementTarget = recordingButton };
+        var screen = new MenuItem { Header = "Gravar monitor inteiro" };
+        screen.Click += (_, _) => StartRecording(false);
+        var region = new MenuItem
+        {
+            Header = "Gravar área selecionada",
+            IsEnabled = SelectedRegionOverlay() != null,
+            ToolTip = "Selecione um recorte com a ferramenta Área."
+        };
+        ToolTipService.SetShowOnDisabled(region, true);
+        region.Click += (_, _) => StartRecording(true);
+        menu.Items.Add(screen);
+        menu.Items.Add(region);
+        menu.IsOpen = true;
+    }
+
+    private void StartRecording(bool regionOnly)
+    {
+        if (Busy || shuttingDown || recording != null) return;
+
+        var target = regionOnly ? SelectedRegionOverlay()
+            : overlays.FirstOrDefault(item => item.Surface == ActiveSurface) ?? MonitorAt(Forms.Cursor.Position);
+        if (target == null) return;
+
+        var bounds = target.Screen.Bounds;
+        if (regionOnly)
+        {
+            if (target.Surface.CaptureRegion is not Rect region) return;
+            bounds = Screenshot.RegionBounds(target, region);
+        }
+        recording = Record(bounds, target.Screen);
+    }
+
+    private async Task Record(Gdi.Rectangle bounds, Forms.Screen screen)
+    {
+        using var stop = new CancellationTokenSource();
+        recordingStop = stop;
+        UpdateRecordingButton(true);
+        IntPtr handle = new WindowInteropHelper(toolbar).EnsureHandle();
+        bool toolbarExcluded = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041)
+            && Native.SetWindowDisplayAffinity(handle, ExcludeFromCapture);
+        try
+        {
+            await app.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Anotador");
+            var result = await Task.Run(() => ScreenRecording.Record(bounds, folder, stop.Token));
+            if (!shuttingDown)
+                ShowSavedNotice(result.Preview, result.Path, screen, "Gravação salva", "Abrir vídeo");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or ArgumentException or InvalidOperationException or System.Runtime.InteropServices.ExternalException)
+        {
+            MessageBox.Show($"Não foi possível salvar a gravação.\n{error.Message}", "Anotador",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            if (toolbarExcluded) Native.SetWindowDisplayAffinity(handle, 0);
+            recordingStop = null;
+            recording = null;
+            UpdateRecordingButton(false);
+        }
+    }
+
+    private void UpdateRecordingButton(bool active)
+    {
+        var label = (StackPanel)recordingButton.Content;
+        string caption = active ? "■ Parar gravação" : "Gravar…";
+        ((TextBlock)label.Children[1]).Text = caption;
+        recordingButton.Background = active ? Brushes.LightCoral : Brushes.WhiteSmoke;
+        recordingButton.ToolTip = Label(active ? "Parar gravação" : "Iniciar gravação", RecordingHotkey);
+        System.Windows.Automation.AutomationProperties.SetName(recordingButton, caption);
+        tray.Text = active ? "Anotador de tela • Gravando" : "Anotador de tela";
     }
 
     private void UpdateModeButton()
@@ -601,10 +718,7 @@ internal sealed class Controller
                 drawing = false;
                 visible = false;
                 ApplyVisibility();
-                var popup = new CaptureNotice(image, path, target.Screen);
-                popup.Closed += (_, _) => notice = null;
-                notice = popup;
-                popup.ShowAtCorner();
+                ShowSavedNotice(image, path, target.Screen, "Captura salva", "Abrir imagem");
             }
             else if (save)
             {
@@ -641,6 +755,16 @@ internal sealed class Controller
                     MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally { FinishOperation(); }
+    }
+
+    private void ShowSavedNotice(BitmapSource preview, string path, Forms.Screen screen,
+        string title, string openLabel)
+    {
+        notice?.Close();
+        var popup = new CaptureNotice(preview, path, screen, title, openLabel);
+        popup.Closed += (_, _) => notice = null;
+        notice = popup;
+        popup.ShowAtCorner();
     }
 
     private void Dispose()

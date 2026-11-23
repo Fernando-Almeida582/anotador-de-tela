@@ -28,6 +28,10 @@ internal static class Native
     [DllImport("user32.dll", EntryPoint = "SetWindowLongW")]
     private static extern int SetWindowLong(IntPtr window, int index, int value);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetWindowDisplayAffinity(IntPtr window, uint affinity);
+
     [DllImport("dwmapi.dll")]
     internal static extern int DwmFlush();
 
